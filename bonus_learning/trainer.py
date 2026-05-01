@@ -26,10 +26,17 @@ bl = BonusLearner(state_n, action_n, action_spec, batch_size)
 loss_psis = []
 loss_phis = []
 
-for i in range(0, 20000):
+for i in range(0, 10000):
 
-    data_one = replay_buffer.sample()
-    data_two = replay_buffer.sample()
+    while True:
+        data_one = replay_buffer.sample()
+        if data_one.shape[0] == batch_size:
+                break
+    
+    while True:
+        data_two = replay_buffer.sample()
+        if data_two.shape[0] == batch_size:
+                break
 
     states_batch_one = data_one['observation'].to('cuda')
     states_batch_two = data_two['observation'].to('cuda')

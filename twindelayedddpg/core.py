@@ -6,7 +6,6 @@ from torchrl.data import LazyTensorStorage, TensorDictReplayBuffer
 from torchrl.data.datasets.minari_data import MinariExperienceReplay
 from torchrl.data.replay_buffers import SamplerWithoutReplacement
 from tensordict import TensorDict 
-from bisim_repr.core import Repr
 import copy 
 import numpy as np 
 import matplotlib.pyplot as plt 
@@ -27,7 +26,7 @@ def softupdate(target, source, tau):
 
 class TD3Agent:
 
-    def __init__(self, env_name, env_id, batch_size, dim, tau, seed, use_repr, scale_reward=True):
+    def __init__(self, env_name, env_id, batch_size, seed, scale_reward=True):
 
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
@@ -35,6 +34,9 @@ class TD3Agent:
         self.state_n = self.env.observation_space.shape[0]
         self.action_n = self.env.action_space.shape[0]
         self.device   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.alpha_c = 1 
+        self.alpha_a = 5
+        self.batch_size = batch_size
 
         self.replay_buffer = MinariExperienceReplay(
             env_id, 
@@ -71,16 +73,25 @@ class TD3Agent:
 
         self.training = False 
 
-        self.bonus_learner = BonusLearner(self.input_dim, self.action_n, self.env.action_space)
+        self.bonus_learner = BonusLearner(self.input_dim, self.action_n, self.env.action_space, batch_size)
 
         self.mean_episode = [] 
         self.mean_loss = [] 
         self.mean_loss_vs = [] 
 
+    def get_data(self):
+
+        while True:
+            data = self.replay_buffer.sample()
+            if data.shape[0] == self.batch_size:
+                break
+        
+        return data
+
     def train_bonus_learner(self, i):
 
-        data_one = self.replay_buffer.sample()
-        data_two = self.replay_buffer.sample()
+        data_one = self.get_data()
+        data_two = self.get_data()
 
         states_batch_one = data_one['observation'].to(self.device)
         states_batch_two = data_two['observation'].to(self.device)
@@ -89,6 +100,16 @@ class TD3Agent:
         loss_phi = self.bonus_learner.train_phi(data_one, data_two)
 
         return loss_psi.detach().cpu().numpy(), loss_phi.detach().cpu().numpy()
+
+    def compute_bonus(self, states, actions):
+
+        data = self.get_data()
+
+        states_other = data['observation'].to(self.device)
+        actions_other = data['action'].to(self.device)
+
+        bonus = self.bonus_learner.compute_bonus(states, actions, states_other, actions_other)
+        return bonus
 
 
     def train(self, i):
@@ -99,7 +120,7 @@ class TD3Agent:
         total_steps_per_epoch = 0 
 
 
-        data = self.replay_buffer.sample()
+        data = self.get_data()
 
         obs_ = data['observation'].to(self.device)
         action_ = data['action'].to(self.device)
@@ -122,6 +143,11 @@ class TD3Agent:
         target_values = torch.min(target_values_a, target_values_b)
         target_q      = reward_ + 0.99*(1-done_)*(target_values)
 
+        bonus_one = self.compute_bonus(next_obs_repr_, predicted_actions)
+        bonus_one = torch.exp(-0.5*bonus_one).detach()
+        bonus_one = self.alpha_c * bonus_one
+        target_q     = target_q + bonus_one
+
         current_q_a = self.qvalue_a(torch.cat([obs_repr_, action_], dim=1)).squeeze(1)
         current_q_b = self.qvalue_b(torch.cat([obs_repr_, action_], dim=1)).squeeze(1)
 
@@ -142,9 +168,12 @@ class TD3Agent:
         if i%2==0:
 
             action_pred =  self.actor(obs_repr_)
-            actor_pred = self.qvalue_a(torch.cat([obs_repr_,action_pred], dim=1))
-            loss_p = -torch.mean(actor_pred, dim=0)
-            loss_p = loss_p
+            actor_pred = self.qvalue_a(torch.cat([obs_repr_,action_pred], dim=1)).squeeze(1)
+            bonus_two = self.compute_bonus(obs_repr_, action_pred)
+            bonus_two = torch.exp(-0.5 * bonus_two).detach()
+            bonus_two = self.alpha_a * bonus_two
+            
+            loss_p = -torch.mean(actor_pred+bonus_two, dim=0)
 
             self.actor.optimizer.zero_grad()
             loss_p.backward()
@@ -170,10 +199,7 @@ class TD3Agent:
 
             while not done and steps < 1000:
                 with torch.no_grad():
-                    if self.no_repr:
-                        obs_repr = torch.tensor(obs, dtype=torch.float64, device=self.device).unsqueeze(0)
-                    else:
-                        obs_repr = self.repr.state_encoder(torch.tensor(obs, dtype=torch.float64, device=self.device).unsqueeze(0))
+                    obs_repr = torch.tensor(obs, dtype=torch.float64, device=self.device).unsqueeze(0)
                     action = self.actor.net(obs_repr)
                     action = torch.tanh(action).squeeze(0)
 

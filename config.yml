@@ -1,0 +1,25 @@
+method: grid 
+
+metric:
+  name: return 
+  goal: maximize 
+
+parameters:
+
+  seed:
+    values: [23, 44, 89]
+
+  env_name:
+    values: ['Hopper-v5']
+
+  env_id:
+    values: ['mujoco/hopper/medium-v0']
+
+  train_epochs:
+    values: [100000]
+
+  eval_freq:
+    values: [5000]
+
+  bonus_train_steps:
+    values: [50000]
